@@ -2,15 +2,17 @@ package com.spidey.ai
 
 import android.animation.ValueAnimator
 import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.BlurMaskFilter
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
-import android.graphics.Path
+import android.graphics.RadialGradient
+import android.graphics.Shader
 import android.view.View
 import android.view.animation.LinearInterpolator
 import kotlin.math.PI
-import kotlin.math.cos
 import kotlin.math.min
 import kotlin.math.sin
 
@@ -19,29 +21,32 @@ class SpideyFaceView(context: Context) : View(context) {
     enum class State { IDLE, LISTENING, SPEAKING }
 
     var state: State = State.IDLE
-        set(v) { field = v; invalidate() }
 
-    private var t = 0f // 0..1 looping clock
+    private var t = 0f
     private val red = Color.parseColor("#FF1E2D")
 
-    private val glow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE; color = red; strokeWidth = 6f
-    }
-    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL; color = Color.parseColor("#1A0004")
-    }
-    private val web = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.STROKE; color = Color.parseColor("#80FF1E2D"); strokeWidth = 1.6f
-    }
-    private val eyeFill = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL; color = Color.parseColor("#F4F4F4")
-    }
-    private val eyeGlow = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        style = Paint.Style.FILL; color = red
-    }
+    private val bmp: Bitmap =
+        BitmapFactory.decodeStream(resources.openRawResource(R.raw.spidey_mask))
+
+    private val softOff = IntArray(2)
+    private val tightOff = IntArray(2)
+    private val glowSoft: Bitmap = bmp.extractAlpha(
+        Paint().apply { maskFilter = BlurMaskFilter(80f, BlurMaskFilter.Blur.NORMAL) }, softOff
+    )
+    private val glowTight: Bitmap = bmp.extractAlpha(
+        Paint().apply { maskFilter = BlurMaskFilter(22f, BlurMaskFilter.Blur.NORMAL) }, tightOff
+    )
+
+    private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = red }
+    private val bmpPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val bgPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val ring = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.STROKE; color = red; strokeWidth = 3f
     }
+
+    private var bgRadius = 0f
+    private var bgCx = 0f
+    private var bgCy = 0f
 
     private val animator = ValueAnimator.ofFloat(0f, 1f).apply {
         duration = 3000
@@ -50,82 +55,69 @@ class SpideyFaceView(context: Context) : View(context) {
         addUpdateListener { t = it.animatedValue as Float; invalidate() }
     }
 
-    init { setLayerType(LAYER_TYPE_SOFTWARE, null) } // needed for blur glow
-
     override fun onAttachedToWindow() { super.onAttachedToWindow(); animator.start() }
     override fun onDetachedFromWindow() { animator.cancel(); super.onDetachedFromWindow() }
 
-    private fun pulse(): Float {
-        val speed = when (state) { State.IDLE -> 1f; State.LISTENING -> 2f; State.SPEAKING -> 4f }
-        val amp = when (state) { State.IDLE -> 0.25f; State.LISTENING -> 0.45f; State.SPEAKING -> 0.7f }
-        return 0.65f + amp * 0.5f * (1f + sin(2.0 * PI * t * speed).toFloat()) * 0.7f
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        bgCx = w / 2f
+        bgCy = h * 0.38f
+        bgRadius = w * 0.85f
+        bgPaint.shader = RadialGradient(
+            bgCx, bgCy, bgRadius,
+            intArrayOf(Color.argb(150, 255, 30, 45), Color.argb(0, 255, 30, 45)),
+            null, Shader.TileMode.CLAMP
+        )
     }
 
     override fun onDraw(c: Canvas) {
         val cx = width / 2f
-        val cy = height * 0.40f
-        val r = min(width, height) * 0.30f
-        val p = pulse()
+        val cy = height * 0.38f
+        val fit = min(width * 0.78f / bmp.width, height * 0.48f / bmp.height)
+        val two = (2.0 * PI).toFloat() * t
 
-        // voice ring(s)
+        val breathe = sin(two)
+        val talk = when (state) {
+            State.SPEAKING -> (sin(two * 7f) * 0.5f + 0.5f) * 0.6f + (sin(two * 11f + 1f) * 0.5f + 0.5f) * 0.4f
+            State.LISTENING -> sin(two * 2f) * 0.5f + 0.5f
+            State.IDLE -> 0f
+        }
+        val scale = fit * (1f + 0.012f * breathe + (if (state == State.SPEAKING) 0.035f * talk else 0f))
+        val rot = when (state) {
+            State.SPEAKING -> 2.2f * sin(two * 3f)
+            State.LISTENING -> 1.2f * sin(two * 2f)
+            State.IDLE -> 0.6f * sin(two)
+        }
+        val bob = height * 0.006f * sin(two * 2f)
+        val strength = when (state) {
+            State.IDLE -> 0.55f + 0.15f * breathe
+            State.LISTENING -> 0.75f + 0.2f * talk
+            State.SPEAKING -> 0.8f + 0.2f * talk
+        }.coerceIn(0f, 1f)
+
+        bgPaint.alpha = (255 * strength).toInt()
+        c.drawCircle(bgCx, bgCy, bgRadius, bgPaint)
+
         if (state != State.IDLE) {
+            val base = bmp.height * fit * 0.5f
+            val speed = if (state == State.LISTENING) 1f else 3f
             for (i in 0..2) {
-                val ph = (t * (if (state == State.LISTENING) 1f else 3f) + i / 3f) % 1f
-                ring.alpha = ((1f - ph) * 140).toInt()
-                ring.maskFilter = null
-                c.drawCircle(cx, cy, r * (1.35f + ph * 0.9f), ring)
+                val ph = (t * speed + i / 3f) % 1f
+                ring.alpha = ((1f - ph) * 150).toInt()
+                c.drawCircle(cx, cy, base * (1.1f + ph * 0.8f), ring)
             }
         }
 
-        val head = headPath(cx, cy, r)
-
-        // outer glow
-        glow.maskFilter = BlurMaskFilter(r * 0.22f * p + 4f, BlurMaskFilter.Blur.NORMAL)
-        glow.alpha = (255 * min(1f, p)).toInt()
-        glow.strokeWidth = r * 0.06f
-        c.drawPath(head, glow)
-
-        // body + webbing
-        c.drawPath(head, fillPaint)
         c.save()
-        c.clipPath(head)
-        web.maskFilter = null
-        for (i in 0 until 14) {
-            val a = (i / 14f) * 2f * PI.toFloat()
-            c.drawLine(cx, cy - 0.1f * r, cx + cos(a) * r * 2f, cy - 0.1f * r + sin(a) * r * 2f, web)
-        }
-        for (k in 1..5) c.drawCircle(cx, cy - 0.1f * r, r * 0.26f * k, web)
+        c.translate(cx, cy + bob)
+        c.rotate(rot)
+        c.scale(scale, scale)
+        c.translate(-bmp.width / 2f, -bmp.height / 2f)
+        glowPaint.alpha = (210 * strength).toInt()
+        c.drawBitmap(glowSoft, softOff[0].toFloat(), softOff[1].toFloat(), glowPaint)
+        glowPaint.alpha = (255 * strength).toInt()
+        c.drawBitmap(glowTight, tightOff[0].toFloat(), tightOff[1].toFloat(), glowPaint)
+        c.drawBitmap(bmp, 0f, 0f, bmpPaint)
         c.restore()
-
-        // crisp edge
-        glow.maskFilter = null
-        glow.alpha = 255
-        glow.strokeWidth = r * 0.03f
-        c.drawPath(head, glow)
-
-        // eyes
-        for (side in intArrayOf(-1, 1)) {
-            val eye = eyePath(cx, cy, r, side)
-            eyeGlow.maskFilter = BlurMaskFilter(r * 0.10f, BlurMaskFilter.Blur.NORMAL)
-            eyeGlow.alpha = (255 * min(1f, p)).toInt()
-            c.drawPath(eye, eyeGlow)
-            c.drawPath(eye, eyeFill)
-        }
-    }
-
-    private fun headPath(cx: Float, cy: Float, r: Float) = Path().apply {
-        moveTo(cx, cy - 1.25f * r)
-        cubicTo(cx + 0.95f * r, cy - 1.25f * r, cx + 1.0f * r, cy - 0.2f * r, cx + 0.8f * r, cy + 0.5f * r)
-        cubicTo(cx + 0.6f * r, cy + 1.15f * r, cx + 0.25f * r, cy + 1.3f * r, cx, cy + 1.3f * r)
-        cubicTo(cx - 0.25f * r, cy + 1.3f * r, cx - 0.6f * r, cy + 1.15f * r, cx - 0.8f * r, cy + 0.5f * r)
-        cubicTo(cx - 1.0f * r, cy - 0.2f * r, cx - 0.95f * r, cy - 1.25f * r, cx, cy - 1.25f * r)
-        close()
-    }
-
-    private fun eyePath(cx: Float, cy: Float, r: Float, s: Int) = Path().apply {
-        moveTo(cx + s * 0.08f * r, cy + 0.25f * r)
-        quadTo(cx + s * 0.35f * r, cy - 0.45f * r, cx + s * 0.85f * r, cy - 0.35f * r)
-        quadTo(cx + s * 0.75f * r, cy + 0.15f * r, cx + s * 0.08f * r, cy + 0.25f * r)
-        close()
     }
 }
